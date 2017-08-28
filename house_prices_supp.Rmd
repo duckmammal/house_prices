@@ -1,0 +1,97 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Snippet that was at the end of my previous house prices
+
+```{r}
+xgb_cv <- xgb.cv( params = xgb_params, data = dtrain, nrounds = 100, nfold = 5, showsd = T, stratified = T, print_every_n = 10, maximize = F)
+```
+
+
+
+```{r}
+with(xgb_cv$evaluation_log, which(test_rmse_mean==min(test_rmse_mean)))
+```
+
+```{r}
+anal<- data.frame(x = gb_dt$evaluation_log$iter, 
+                  y = gb_dt$evaluation_log$train_rmse,
+                  z = gb_dt$evaluation_log$valid_rmse)
+```
+
+```{r}
+ggplot(anal %>% filter(y<.3), aes(x)) + 
+    geom_line(aes(y = y, colour = "training")) +
+    geom_line(aes(y = z, colour = "validation")) +
+    theme_bw()
+```
+
+
+```{r}
+fct_train <- training %>% select(-Id,-Data) %>% dummy.data.frame(dummy.class="factor" )
+fct_test <- testing %>% select(-Id,-Data) %>% 
+    dummy.data.frame(dummy.class="factor" ) %>% 
+    apply(2,as.numeric) %>% 
+    as.data.frame()
+
+fct_val  <- fct_train[-trainIndex,]
+fct_train <- fct_train[trainIndex,]
+```
+
+prepare the data
+
+```{r}
+dtrain <- xgb.DMatrix(as.matrix(fct_train),label = fct_train$SalePrice)
+dvalid <- xgb.DMatrix(as.matrix(fct_val),label = fct_val$SalePrice)
+dtest <- xgb.DMatrix(as.matrix(fct_test))
+```
+
+Run the thing
+
+```{r}
+set.seed(4321)
+gb_dt2 <- xgb.train(params = xgb_params,
+                   data = dtrain,
+                   print_every_n = 25,
+                   watchlist = watchlist,
+                   nrounds = 300)
+```
+
+
+Plot it
+
+```{r}
+anal2<- data.frame(x = gb_dt2$evaluation_log$iter, 
+                  y = gb_dt2$evaluation_log$train_rmse,
+                  z = gb_dt2$evaluation_log$valid_rmse)
+```
+
+```{r}
+# ggplot(anal2 %>% filter(y<.3), aes(x)) + 
+#     geom_line(aes(y = y, colour = "training")) +
+#     geom_line(aes(y = z, colour = "validation")) +
+#     theme_bw()
+```
+
+```{r}
+
+```
+
+Resubmit
+
+```{r}
+test_preds2 <- predict(gb_dt2,dtest)
+pred2 <- test_id %>%
+  mutate(SalePrice = exp(test_preds))
+```
+
+```{r}
+pred2 %>% write_csv('submit2.csv')
+identical(dim(sample_sub),dim(pred2))
+```
+
+```{r}
+
+```

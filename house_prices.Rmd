@@ -1,0 +1,422 @@
+---
+title: "House Prices"
+author: "Kenneth Osborne"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    number_sections: true
+    fig_caption: true
+    toc: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+# knitr::opts_chunk$set(cache=TRUE)
+myWD='C:/Users/Duckie/Documents/myR/kaggle/house_prices/'
+knitr::opts_chunk$set(root.dir = myWD)
+```
+
+# Introduction
+
+
+
+## Load libraries and helper functions
+
+```{r, message = FALSE}
+library('tidyverse') # all around good package
+library('data.table') # data manipulation
+library('dummies') # data manipulation
+library('stringr') # text manipulation
+library('corrplot') # visualization
+library('party') # modelling
+library('caret') # modelling
+library('xgboost') #modelling
+```
+
+
+## Load Data
+
+Here's a brief version of what you'll find in the data description file.
+
+* SalePrice - the property's sale price in dollars. This is the target variable that you're trying to predict.
+* MSSubClass: The building class
+* MSZoning: The general zoning classification
+* LotFrontage: Linear feet of street connected to property
+* LotArea: Lot size in square feet
+* Street: Type of road access
+* Alley: Type of alley access
+* LotShape: General shape of property
+* LandContour: Flatness of the property
+* Utilities: Type of utilities available
+* LotConfig: Lot configuration
+* LandSlope: Slope of property
+* Neighborhood: Physical locations within Ames city limits
+* Condition1: Proximity to main road or railroad
+* Condition2: Proximity to main road or railroad (if a second is present)
+* BldgType: Type of dwelling
+* HouseStyle: Style of dwelling
+* OverallQual: Overall material and finish quality
+* OverallCond: Overall condition rating
+* YearBuilt: Original construction date
+* YearRemodAdd: Remodel date
+* RoofStyle: Type of roof
+* RoofMatl: Roof material
+* Exterior1st: Exterior covering on house
+* Exterior2nd: Exterior covering on house (if more than one material)
+* MasVnrType: Masonry veneer type
+* MasVnrArea: Masonry veneer area in square feet
+* ExterQual: Exterior material quality
+* ExterCond: Present condition of the material on the exterior
+* Foundation: Type of foundation
+* BsmtQual: Height of the basement
+* BsmtCond: General condition of the basement
+* BsmtExposure: Walkout or garden level basement walls
+* BsmtFinType1: Quality of basement finished area
+* BsmtFinSF1: Type 1 finished square feet
+* BsmtFinType2: Quality of second finished area (if present)
+* BsmtFinSF2: Type 2 finished square feet
+* BsmtUnfSF: Unfinished square feet of basement area
+* TotalBsmtSF: Total square feet of basement area
+* Heating: Type of heating
+* HeatingQC: Heating quality and condition
+* CentralAir: Central air conditioning
+* Electrical: Electrical system
+* 1stFlrSF: First Floor square feet
+* 2ndFlrSF: Second floor square feet
+* LowQualFinSF: Low quality finished square feet (all floors)
+* GrLivArea: Above grade (ground) living area square feet
+* BsmtFullBath: Basement full bathrooms
+* BsmtHalfBath: Basement half bathrooms
+* FullBath: Full bathrooms above grade
+* HalfBath: Half baths above grade
+* Bedroom: Number of bedrooms above basement level
+* Kitchen: Number of kitchens
+* KitchenQual: Kitchen quality
+* TotRmsAbvGrd: Total rooms above grade (does not include bathrooms)
+* Functional: Home functionality rating
+* Fireplaces: Number of fireplaces
+* FireplaceQu: Fireplace quality
+* GarageType: Garage location
+* GarageYrBlt: Year garage was built
+* GarageFinish: Interior finish of the garage
+* GarageCars: Size of garage in car capacity
+* GarageArea: Size of garage in square feet
+* GarageQual: Garage quality
+* GarageCond: Garage condition
+* PavedDrive: Paved driveway
+* WoodDeckSF: Wood deck area in square feet
+* OpenPorchSF: Open porch area in square feet
+* EnclosedPorch: Enclosed porch area in square feet
+* 3SsnPorch: Three season porch area in square feet
+* ScreenPorch: Screen porch area in square feet
+* PoolArea: Pool area in square feet
+* PoolQC: Pool quality
+* Fence: Fence quality
+* MiscFeature: Miscellaneous feature not covered in other categories
+* MiscVal: $Value of miscellaneous feature
+* MoSold: Month Sold
+* YrSold: Year Sold
+* SaleType: Type of sale
+* SaleCondition: Condition of sale
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+setwd('input')
+
+training <- read.csv("train.csv") %>% cbind(Data="Training")
+testing  <- read.csv("test.csv") %>% cbind(Data="Testing")
+sample_sub  <- read.csv("sample_submission.csv")
+
+df <- rbind(training %>% select(-SalePrice),testing)
+```
+
+## File structure
+
+We inspect some basics
+
+```{r}
+df %>% dim
+
+facts<- sapply(df,is.factor)
+nums<- sapply(df,is.numeric)
+
+cat(sum(facts), "factor variables and ", sum(nums), "numeric variables")
+```
+
+Checks on single valued variables and duplicate columns.
+
+```{r}
+cat("Duplicate Column Count:", nrow(df) - nrow(unique(df)))
+
+col_ct = sapply(df, function(x) length(unique(x)))
+cat("; Constant feature count:", length(col_ct[col_ct==1]))
+```
+
+Missing values
+
+```{r}
+missing_values <- df %>% summarize_all(funs(sum(is.na(.))))
+
+missing_values <- gather(missing_values, key="feature", value="num_missing") %>% 
+    cbind(is_factor = facts)
+
+missing_values %>% 
+    filter(num_missing>4) %>% 
+    ggplot(aes(x=reorder(feature,num_missing),y=num_missing, fill=is_factor)) +
+    xlab("Feature Name") +
+    ylab("Number of Values Missing") +
+    geom_bar(stat="identity")+
+    coord_flip()+theme_bw()
+```
+
+There are so many missing values that they have to be dealt with.
+
+# Data Wrangling
+
+## Fix NA values 
+
+
+We create a useful function for automatically adding a level named "None" to in place of NA.
+
+```{r}
+add_na_lvl <- function(x,na_lvl = which(x %>% is.na)){
+    levels(x) <- c(levels(x),"None")
+    x[na_lvl] <- "None"
+    return(x)
+}
+```
+
+### The Pools
+
+Add new PoolQC feature for places with no pool area.
+
+```{r}
+noPools<- which(df$PoolArea==0 & is.na(df$PoolQC))
+
+df$PoolQC <- add_na_lvl(df$PoolQC,noPools)
+```
+
+
+### Misc Feature, Alley, Fence, Fire Place
+
+We apply the function to the next biggest interlopers.
+
+```{r}
+cleanme <- c("MiscFeature", "Alley", "Fence", "FireplaceQu")
+df[,cleanme] <- apply(df[,cleanme],2,add_na_lvl) %>% as.data.frame()
+```
+
+### Lot Frontage
+
+Sometimes there's no numeric value. Maybe that's the same as 0?
+```{r}
+which(df$LotFrontage==0)
+```
+
+It seems like these might be houses at the end of a street.
+
+```{r}
+df$LotFrontage[is.na(df$LotFrontage)]=0
+```
+
+### Garages
+
+Make factor for places with no garage
+
+```{r}
+noGarage <- which(df$GarageArea==0)
+
+cleanme <- c("GarageType", "GarageCond", "GarageFinish", "GarageQual")
+df[,cleanme] <- apply(df[,cleanme],2, function(x) {
+    add_na_lvl(x,noGarage)
+}) %>% as.data.frame
+
+df$GarageYrBlt[noGarage] <- 0
+```
+
+### Basements
+
+Get rid of NA values in places without a basement.
+
+```{r}
+cleanme = c("BsmtQual","BsmtCond","BsmtExposure","BsmtFinType1","BsmtFinType2")
+noBsmnt <- which(df$BsmtFinSF1==0 & df$BsmtFinSF2==0 & df$BsmtUnfSF==0)
+
+df[noBsmnt,cleanme] %>% as.tbl()
+
+df[,cleanme] <- apply(df[,cleanme],2, function(x) {
+    add_na_lvl(x,noBsmnt)
+}) %>% as.data.frame
+```
+
+### Masonry
+
+```{r}
+df$MasVnrType <- df$MasVnrType %>% add_na_lvl
+df$MasVnrArea[df$MasVnrArea %>% is.na()] <- 0
+```
+
+## Check NA vals
+
+And then re-evaluate
+
+```{r}
+missing_values <- df %>% summarize_all(funs(sum(is.na(.))))
+
+missing_values <- gather(missing_values, key="feature", value="num_missing") %>% 
+    cbind(is_factor = facts)
+
+missing_values %>% 
+    filter(num_missing>0) %>% 
+    ggplot(aes(x=reorder(feature,num_missing),y=num_missing, fill=is_factor)) +
+    xlab("Feature Name") +
+    ylab("Number of Values Missing") +
+    geom_bar(stat="identity")+
+    coord_flip()+theme_bw()
+```
+
+# Modelling
+
+Looking to minimize the Root Mean Squared Logarithmic Error
+
+```{r}
+target <- training %>% mutate(SalePrice=log(SalePrice))
+training <- df %>% filter(Data=="Training") %>% mutate(SalePrice = target$SalePrice)
+testing <- df %>% filter(Data=="Testing")
+```
+
+make it all numbers
+
+```{r, warning=FALSE}
+numbr_train <- training
+# numbr_train <- apply(training,2,as.numeric) %>% as.data.frame()
+for (i in 1:dim(numbr_train)[2]) {
+    numbr_train[,i] <- numbr_train[,i] %>% as.numeric()
+}
+
+numbr_test <- testing
+# numbr_test <- apply(testing,2,as.numeric) %>% as.data.frame()
+for (i in 1:dim(numbr_test)[2]) {
+    numbr_test[,i] <- numbr_test[,i] %>% as.numeric()
+}
+```
+
+Next we partition
+
+```{r}
+set.seed(4321)
+trainIndex <- createDataPartition(numbr_train$SalePrice, p = 0.8, list = FALSE, times = 1)
+
+n_training <- numbr_train[trainIndex,]
+n_validation <- numbr_train[-trainIndex,]
+```
+
+Reformat for XGB
+
+```{r}
+foo <- n_training %>% select(-c(SalePrice,Id,Data))
+bar <- n_validation %>% select(-c(SalePrice,Id,Data))
+baz <- numbr_test %>% select(-c(Id,Data))
+
+dtrain <- xgb.DMatrix(as.matrix(foo),label = n_training$SalePrice)
+dvalid <- xgb.DMatrix(as.matrix(bar),label = n_validation$SalePrice)
+dtest <- xgb.DMatrix(as.matrix(baz))
+```
+
+Set the parameters
+
+```{r}
+xgb_params <- list(colsample_bytree = 0.5, #variables per tree 
+                   subsample = 1, #data subset per tree 
+                   booster = "gbtree",
+                   max_depth = 6, #tree levels
+                   eta = 0.3, #shrinkage
+                   eval_metric = "rmse", 
+                   objective = "reg:linear",
+                   seed = 4321
+                   )
+
+watchlist <- list(train=dtrain, valid=dvalid)
+```
+
+Run the thing
+
+```{r}
+set.seed(4321)
+gb_dt <- xgb.train(params = xgb_params,
+                   data = dtrain,
+                   print_every_n = 25,
+                   watchlist = watchlist,
+                   nrounds = 300)
+```
+
+```{r}
+imp_matrix <- xgb.importance(feature_names = colnames(foo), model = gb_dt)
+
+imp_matrix %>% filter(Gain>.005) %>% 
+  ggplot(aes(reorder(Feature, Gain, FUN = max), Gain, fill = Feature)) +
+  geom_col() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  labs(x = "Features", y = "Importance")
+```
+
+```{r}
+pred1 <- predict(gb_dt,dtest)
+pred1 <- exp(pred1)
+```
+
+Create output file
+
+```{r}
+
+pred <- testing %>% select(Id) %>% mutate(SalePrice=pred1)
+pred %>% write_csv('submit.csv')
+identical(dim(sample_sub),dim(pred))
+```
+
+```{r}
+# set up the cross-validated hyper-parameter search
+xgb_grid_1 = expand.grid(colsample_bytree = c(0.3,.04,0.5,0.6,0.7) #variables per tree 
+                         subsample = 1, #data subset per tree 
+                         booster = "gbtree",
+                         max_depth = 6, #tree levels
+                         eta = 0.3, #shrinkage
+                         eval_metric = "rmse", 
+                         objective = "reg:linear",
+                         seed = 4321)
+ 
+# pack the training control parameters
+xgb_trcontrol_1 = trainControl(
+method = "cv",
+number = 5,
+verboseIter = TRUE,
+returnData = FALSE,
+returnResamp = "all",                                                        # save losses across all models
+classProbs = TRUE,                                                           # set to TRUE for AUC to be computed
+summaryFunction = twoClassSummary,
+allowParallel = TRUE
+)
+ 
+# train the model for each parameter combination in the grid,
+#   using CV to evaluate
+xgb_train_1 = train(
+x = as.matrix(df_train %>%
+select(-SeriousDlqin2yrs)),
+y = as.factor(df_train$SeriousDlqin2yrs),
+trControl = xgb_trcontrol_1,
+tuneGrid = xgb_grid_1,
+method = "xgbTree"
+)
+ 
+# scatter plot of the AUC against max_depth and eta
+ggplot(xgb_train_1$results, aes(x = as.factor(eta), y = max_depth, size = ROC, color = ROC)) +
+geom_point() +
+theme_bw() +
+scale_size_continuous(guide = "none")
+```
